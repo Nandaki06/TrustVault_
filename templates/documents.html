@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Documents | TrustVault</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+    <h1>TrustVault</h1>
+    <p>Secure Documents. Trusted Access.</p>
+
+    <form>
+        <h2>My Documents</h2>
+
+        {% if files %}
+            {% for file in files %}
+
+                <p>{{ file["filename"] }}</p>
+
+                <a href="{{ url_for('download', document_id=file['id']) }}">
+                    Download
+                </a>
+
+                <form method="POST" action="{{ url_for('delete', document_id=file['id']) }}">
+                    <button type="submit">Delete</button>
+                </form>
+
+                <hr>
+
+            {% endfor %}
+        {% else %}
+            <p>No documents uploaded yet.</p>
+        {% endif %}
+
+        <a href="/dashboard">Back to Dashboard</a>
+
+        <br><br>
+
+        <a href="/logout">Logout</a>
+    </form>
+
+</body>
+</html>

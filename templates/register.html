@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustVault Register</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+    <h1>TrustVault</h1>
+    <p>Secure Documents. Trusted Access.</p>
+
+    <form method="POST" action="/register">
+        <h2>Create Your Account</h2>
+
+        <input
+            type="email"
+            name="email"
+            placeholder="Enter Email"
+            required
+        >
+
+        <input
+            type="password"
+            name="password"
+            placeholder="Create Password (Minimum 8 Characters)"
+            minlength="8"
+            required
+        >
+
+        <button type="submit">Register</button>
+
+        <p>
+            Already have an account?
+            <a href="/login">Login</a>
+        </p>
+    </form>
+
+</body>
+</html>

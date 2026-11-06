@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustVault Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+    <h1>TrustVault</h1>
+    <p>Secure Documents. Trusted Access.</p>
+
+    <form method="POST" action="/upload" enctype="multipart/form-data">
+
+        <h2>Welcome to Your Dashboard</h2>
+
+        <p>Your documents. One secure place.</p>
+
+        <input
+            type="file"
+            name="document"
+            accept=".pdf,.png,.jpg,.jpeg,.docx"
+            required
+        >
+
+        <button type="submit">Upload Document</button>
+
+        <a href="/documents">My Documents</a>
+
+        <br><br>
+
+        <a href="/logout">Logout</a>
+
+    </form>
+
+</body>
+</html>
