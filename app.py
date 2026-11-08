@@ -1,4 +1,3 @@
-
 import os
 from dotenv import load_dotenv
 import io
@@ -11,53 +10,73 @@ import secrets
 import sqlite3
 import psycopg
 import zipfile
+
 from datetime import datetime, timezone
 from functools import wraps
 
 from flask import (
     Flask, render_template, request, redirect,
-    url_for, session, send_file, abort, g
+    url_for, session, send_file, abort
 )
+
 from cryptography.fernet import Fernet, InvalidToken
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from psycopg.rows import dict_row
+from supabase import create_client
 
 
 # =====================================================
-# APPLICATION CONFIGURATION
+# CONFIGURATION
 # =====================================================
 
 load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE = os.path.join(BASE_DIR, "trustvault.db")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+KEY_FILE = os.path.join(BASE_DIR, "secret.key")
+
+BUCKET_NAME = "trustvault-documents"
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
+
+DB_MODE = os.environ.get("TRUSTVAULT_DB_MODE", "sqlite").lower()
+
+USE_POSTGRES = DB_MODE == "postgres"
+
+if USE_POSTGRES and not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is required.")
+
+if USE_POSTGRES and (not SUPABASE_URL or not SUPABASE_SECRET_KEY):
+    raise RuntimeError("Supabase credentials are missing.")
+
 secret_key = os.environ.get("TRUSTVAULT_SECRET")
 
 if not secret_key:
-    secret_key_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        ".flask_secret"
-    )
+    secret_key_path = os.path.join(BASE_DIR, ".flask_secret")
 
     if os.path.exists(secret_key_path):
-        with open(secret_key_path, "r") as key_file:
-            secret_key = key_file.read().strip()
+        with open(secret_key_path, "r", encoding="utf-8") as f:
+            secret_key = f.read().strip()
     else:
         secret_key = secrets.token_hex(32)
-        with open(secret_key_path, "w") as key_file:
-            key_file.write(secret_key)
+
+        with open(secret_key_path, "w", encoding="utf-8") as f:
+            f.write(secret_key)
+
 app = Flask(__name__)
 app.secret_key = secret_key
 
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
 app.config["SESSION_COOKIE_SECURE"] = (
     os.environ.get("TRUSTVAULT_HTTPS", "0") == "1"
 )
-
-DATABASE = "trustvault.db"
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
-UPLOAD_FOLDER = "uploads"
-KEY_FILE = "secret.key"
 
 ALLOWED_EXTENSIONS = {
     "pdf", "png", "jpg", "jpeg", "docx"
@@ -65,135 +84,320 @@ ALLOWED_EXTENSIONS = {
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+supabase = (
+    create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+    if USE_POSTGRES else None
+)
+
 
 # =====================================================
 # ENCRYPTION
 # =====================================================
 
 def load_encryption_key():
+
+    env_key = os.environ.get("TRUSTVAULT_ENCRYPTION_KEY")
+
+    if env_key:
+        try:
+            return Fernet(env_key.encode("utf-8"))
+        except Exception as error:
+            raise RuntimeError(
+                "Invalid TRUSTVAULT_ENCRYPTION_KEY."
+            ) from error
+
+    if USE_POSTGRES:
+        raise RuntimeError(
+            "Set TRUSTVAULT_ENCRYPTION_KEY before using PostgreSQL."
+        )
+
     if not os.path.exists(KEY_FILE):
-        key = Fernet.generate_key()
+        with open(KEY_FILE, "wb") as f:
+            f.write(Fernet.generate_key())
 
-        with open(KEY_FILE, "wb") as key_file:
-            key_file.write(key)
-
-    with open(KEY_FILE, "rb") as key_file:
-        key = key_file.read()
-
-    return Fernet(key)
+    with open(KEY_FILE, "rb") as f:
+        return Fernet(f.read())
 
 
 cipher = load_encryption_key()
 
 
 # =====================================================
-# DATABASE
+# DATABASE ADAPTER
 # =====================================================
 
+class PostgresConnection:
+
+    def __init__(self, connection):
+        self.connection = connection
+
+    @staticmethod
+    def _convert_sql(sql):
+        return sql.replace("?", "%s")
+
+    def execute(self, sql, parameters=()):
+        return self.connection.execute(
+            self._convert_sql(sql), parameters
+        )
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+
 def get_db():
+
+    if USE_POSTGRES and not app.config.get("TESTING", False):
+
+        connection = psycopg.connect(
+            DATABASE_URL,
+            row_factory=dict_row
+        )
+
+        return PostgresConnection(connection)
+
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
+
     conn.execute("PRAGMA foreign_keys = ON")
+
     return conn
 
 
+# =====================================================
+# DATABASE CREATION
+# =====================================================
+
 def create_database():
+
     conn = get_db()
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    """)
+    try:
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            filename TEXT NOT NULL,
-            stored_filename TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+        """)
 
-    user_columns = {
-        row["name"]
-        for row in conn.execute(
-            "PRAGMA table_info(users)"
-        ).fetchall()
-    }
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                filename TEXT NOT NULL,
+                stored_filename TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
 
-    if "role" not in user_columns:
+        user_columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(users)"
+            ).fetchall()
+        }
+
+        if "role" not in user_columns:
+            conn.execute("""
+                ALTER TABLE users
+                ADD COLUMN role TEXT NOT NULL DEFAULT 'owner'
+            """)
+
+        document_columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(documents)"
+            ).fetchall()
+        }
+
+        if "encrypted" not in document_columns:
+            conn.execute("""
+                ALTER TABLE documents
+                ADD COLUMN encrypted INTEGER DEFAULT 0
+            """)
+
+        if "category" not in document_columns:
+            conn.execute("""
+                ALTER TABLE documents
+                ADD COLUMN category TEXT DEFAULT 'General'
+            """)
+
+        if "created_at" not in document_columns:
+            conn.execute("""
+                ALTER TABLE documents
+                ADD COLUMN created_at TEXT
+            """)
+
+        conn.execute("""
+            UPDATE documents
+            SET created_at = ?
+            WHERE created_at IS NULL
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+        ))
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS document_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                permission TEXT NOT NULL
+                    CHECK(permission IN ('read', 'edit')),
+                granted_at TEXT NOT NULL,
+                UNIQUE(document_id, user_id),
+                FOREIGN KEY(document_id) REFERENCES documents(id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT NOT NULL,
+                document_id INTEGER,
+                details TEXT,
+                result TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                previous_hash TEXT NOT NULL,
+                entry_hash TEXT NOT NULL
+            )
+        """)
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+def check_postgres_schema():
+
+    if not USE_POSTGRES:
+        return
+
+    conn = get_db()
+
+    try:
+
         conn.execute("""
             ALTER TABLE users
-            ADD COLUMN role TEXT NOT NULL DEFAULT 'owner'
+            ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'owner'
         """)
 
-    document_columns = {
-        row["name"]
-        for row in conn.execute(
-            "PRAGMA table_info(documents)"
-        ).fetchall()
-    }
-
-    if "encrypted" not in document_columns:
         conn.execute("""
             ALTER TABLE documents
-            ADD COLUMN encrypted INTEGER DEFAULT 0
+            ADD COLUMN IF NOT EXISTS encrypted INTEGER NOT NULL DEFAULT 0
         """)
 
-    if "category" not in document_columns:
         conn.execute("""
             ALTER TABLE documents
-            ADD COLUMN category TEXT DEFAULT 'General'
+            ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'General'
         """)
 
-    if "created_at" not in document_columns:
         conn.execute("""
             ALTER TABLE documents
-            ADD COLUMN created_at TEXT
+            ADD COLUMN IF NOT EXISTS created_at TEXT
         """)
 
-    conn.execute("""
-        UPDATE documents
-        SET created_at = ?
-        WHERE created_at IS NULL
-    """, (datetime.now(timezone.utc).isoformat(),))
+        conn.execute("""
+            UPDATE documents
+            SET created_at = ?
+            WHERE created_at IS NULL
+        """, (
+            datetime.now(timezone.utc).isoformat(),
+        ))
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS document_permissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            document_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            permission TEXT NOT NULL
-                CHECK(permission IN ('read', 'edit')),
-            granted_at TEXT NOT NULL,
-            UNIQUE(document_id, user_id),
-            FOREIGN KEY(document_id)
-                REFERENCES documents(id),
-            FOREIGN KEY(user_id)
-                REFERENCES users(id)
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# =====================================================
+# STORAGE
+# =====================================================
+
+def save_encrypted_file(data, user_id):
+
+    stored_filename = (
+        f"{user_id}_{uuid.uuid4()}.encrypted"
+    )
+
+    encrypted_data = cipher.encrypt(data)
+
+    if USE_POSTGRES and not app.config.get("TESTING", False):
+
+        supabase.storage.from_(BUCKET_NAME).upload(
+            stored_filename,
+            encrypted_data,
+            file_options={
+                "content-type": "application/octet-stream",
+                "upsert": "false"
+            }
         )
-    """)
 
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            action TEXT NOT NULL,
-            document_id INTEGER,
-            details TEXT,
-            result TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            previous_hash TEXT NOT NULL,
-            entry_hash TEXT NOT NULL
+    else:
+
+        file_path = os.path.join(
+            UPLOAD_FOLDER, stored_filename
         )
-    """)
 
-    conn.commit()
-    conn.close()
+        with open(file_path, "wb") as f:
+            f.write(encrypted_data)
+
+    return stored_filename
+
+
+def read_stored_file(stored_filename):
+
+    if USE_POSTGRES and not app.config.get("TESTING", False):
+
+        return supabase.storage.from_(
+            BUCKET_NAME
+        ).download(stored_filename)
+
+    file_path = os.path.join(
+        UPLOAD_FOLDER, stored_filename
+    )
+
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(stored_filename)
+
+    with open(file_path, "rb") as f:
+        return f.read()
+
+
+def delete_stored_file(stored_filename):
+
+    if USE_POSTGRES and not app.config.get("TESTING", False):
+
+        supabase.storage.from_(BUCKET_NAME).remove(
+            [stored_filename]
+        )
+
+        return
+
+    file_path = os.path.join(
+        UPLOAD_FOLDER, stored_filename
+    )
+
+    if os.path.isfile(file_path):
+        os.remove(file_path)
 
 
 # =====================================================
@@ -206,9 +410,11 @@ def log_event(
     details="",
     result="success"
 ):
+
     conn = get_db()
 
     try:
+
         previous = conn.execute("""
             SELECT entry_hash
             FROM audit_logs
@@ -217,10 +423,14 @@ def log_event(
         """).fetchone()
 
         previous_hash = (
-            previous["entry_hash"] if previous else "GENESIS"
+            previous["entry_hash"]
+            if previous else "GENESIS"
         )
 
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = datetime.now(
+            timezone.utc
+        ).isoformat()
+
         user_id = session.get("user_id")
 
         record = {
@@ -267,16 +477,21 @@ def log_event(
 
 
 def verify_audit_chain():
+
     conn = get_db()
 
     try:
+
         logs = conn.execute("""
-            SELECT * FROM audit_logs ORDER BY id ASC
+            SELECT *
+            FROM audit_logs
+            ORDER BY id ASC
         """).fetchall()
 
         previous_hash = "GENESIS"
 
         for log in logs:
+
             record = {
                 "user_id": log["user_id"],
                 "action": log["action"],
@@ -300,7 +515,8 @@ def verify_audit_chain():
             if (
                 log["previous_hash"] != previous_hash
                 or not hmac.compare_digest(
-                    log["entry_hash"], expected_hash
+                    log["entry_hash"],
+                    expected_hash
                 )
             ):
                 return False
@@ -319,25 +535,34 @@ def verify_audit_chain():
 
 @app.before_request
 def csrf_protection():
+
     if request.method == "POST":
+
         token = session.get("csrf_token")
-        submitted_token = request.form.get("csrf_token", "")
+        submitted_token = request.form.get(
+            "csrf_token", ""
+        )
 
         if (
             not token
             or not submitted_token
-            or not hmac.compare_digest(token, submitted_token)
+            or not hmac.compare_digest(
+                token, submitted_token
+            )
         ):
+
             log_event(
                 "CSRF_VALIDATION",
                 details=request.path,
                 result="denied"
             )
+
             abort(400)
 
 
 @app.context_processor
 def inject_csrf_token():
+
     if "csrf_token" not in session:
         session["csrf_token"] = secrets.token_urlsafe(32)
 
@@ -351,14 +576,18 @@ def inject_csrf_token():
 # =====================================================
 
 def login_required(function):
+
     @wraps(function)
     def wrapper(*args, **kwargs):
+
         if "user_id" not in session:
+
             log_event(
                 "UNAUTHENTICATED_ACCESS",
                 details=request.path,
                 result="denied"
             )
+
             return redirect(url_for("login"))
 
         return function(*args, **kwargs)
@@ -367,23 +596,31 @@ def login_required(function):
 
 
 def admin_required(function):
+
     @wraps(function)
     @login_required
     def wrapper(*args, **kwargs):
+
         conn = get_db()
 
-        user = conn.execute("""
-            SELECT role FROM users WHERE id = ?
-        """, (session["user_id"],)).fetchone()
+        try:
 
-        conn.close()
+            user = conn.execute(
+                "SELECT role FROM users WHERE id = ?",
+                (session["user_id"],)
+            ).fetchone()
+
+        finally:
+            conn.close()
 
         if not user or user["role"] != "admin":
+
             log_event(
                 "ADMIN_ACCESS",
                 details=request.path,
                 result="denied"
             )
+
             abort(403)
 
         return function(*args, **kwargs)
@@ -396,12 +633,15 @@ def admin_required(function):
 # =====================================================
 
 def get_document_access(document_id):
+
     conn = get_db()
 
     try:
-        document = conn.execute("""
-            SELECT * FROM documents WHERE id = ?
-        """, (document_id,)).fetchone()
+
+        document = conn.execute(
+            "SELECT * FROM documents WHERE id = ?",
+            (document_id,)
+        ).fetchone()
 
         if not document:
             return None, None
@@ -432,6 +672,7 @@ def get_document_access(document_id):
 # =====================================================
 
 def allowed_file(filename):
+
     return (
         "." in filename
         and filename.rsplit(".", 1)[1].lower()
@@ -440,6 +681,7 @@ def allowed_file(filename):
 
 
 def validate_file_content(filename, data):
+
     if not data:
         return False
 
@@ -455,98 +697,56 @@ def validate_file_content(filename, data):
         return data.startswith(b"\xff\xd8\xff")
 
     if extension == "docx":
+
         try:
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+
+            with zipfile.ZipFile(
+                io.BytesIO(data)
+            ) as archive:
+
                 return (
                     archive.testzip() is None
-                    and "word/document.xml" in archive.namelist()
+                    and "word/document.xml"
+                    in archive.namelist()
                 )
+
         except zipfile.BadZipFile:
             return False
 
     return False
-
-
-def save_encrypted_file(data, user_id):
-    stored_filename = (
-        str(user_id) + "_" + str(uuid.uuid4()) + ".encrypted"
-    )
-
-    encrypted_data = cipher.encrypt(data)
-
-    file_path = os.path.join(
-        UPLOAD_FOLDER,
-        stored_filename
-    )
-
-    with open(file_path, "wb") as encrypted_file:
-        encrypted_file.write(encrypted_data)
-
-    return stored_filename
-
-
 # =====================================================
-# HOME
+# HOME AND REGISTRATION
 # =====================================================
 
-
+@app.route("/")
 def home():
     return render_template("index.html")
 
 
-# =====================================================
-# REGISTER
-# =====================================================
-
-app.route("/register", methods=["GET", "POST"])
+@app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
-        email = request.form.get(
-            "email", ""
-        ).strip().lower()
-
+        email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
 
-        if (
-            not email
-            or "@" not in email
-            or len(password) < 8
-        ):
-            log_event(
-                "REGISTER",
-                details=email,
-                result="denied"
-            )
-            return (
-                "Enter a valid email and password "
-                "with at least 8 characters."
-            )
-
-        hashed_password = generate_password_hash(password)
+        if not email or "@" not in email or len(password) < 8:
+            log_event("REGISTER", details=email, result="denied")
+            return "Enter a valid email and password with at least 8 characters."
 
         conn = get_db()
-
         try:
-            conn.execute("""
-                INSERT INTO users (email, password, role)
-                VALUES (?, ?, 'owner')
-            """, (email, hashed_password))
-
-            conn.commit()
-
-        except sqlite3.IntegrityError:
-            log_event(
-                "REGISTER",
-                details=email,
-                result="denied"
+            conn.execute(
+                "INSERT INTO users (email, password, role) VALUES (?, ?, 'owner')",
+                (email, generate_password_hash(password))
             )
+            conn.commit()
+        except (sqlite3.IntegrityError, psycopg.IntegrityError):
+            log_event("REGISTER", details=email, result="denied")
             return "Email already registered."
-
         finally:
             conn.close()
 
         log_event("REGISTER", details=email)
-
         return redirect(url_for("login"))
 
     return render_template("register.html")
@@ -559,37 +759,25 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        email = request.form.get(
-            "email", ""
-        ).strip().lower()
-
+        email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
 
         conn = get_db()
+        try:
+            user = conn.execute(
+                "SELECT * FROM users WHERE email = ?", (email,)
+            ).fetchone()
+        finally:
+            conn.close()
 
-        user = conn.execute("""
-            SELECT * FROM users WHERE email = ?
-        """, (email,)).fetchone()
-
-        conn.close()
-
-        if user and check_password_hash(
-            user["password"], password
-        ):
+        if user and check_password_hash(user["password"], password):
             session.clear()
             session["user_id"] = user["id"]
             session["csrf_token"] = secrets.token_urlsafe(32)
-
             log_event("LOGIN", details=email)
-
             return redirect(url_for("dashboard"))
 
-        log_event(
-            "LOGIN",
-            details=email,
-            result="denied"
-        )
-
+        log_event("LOGIN", details=email, result="denied")
         return "Invalid email or password."
 
     return render_template("login.html")
@@ -603,66 +791,51 @@ def login():
 @login_required
 def dashboard():
     conn = get_db()
-
-    user = conn.execute("""
-        SELECT role FROM users WHERE id = ?
-    """, (session["user_id"],)).fetchone()
-
-    conn.close()
+    try:
+        user = conn.execute(
+            "SELECT role FROM users WHERE id = ?", (session["user_id"],)
+        ).fetchone()
+    finally:
+        conn.close()
 
     if not user:
         session.clear()
         return redirect(url_for("login"))
 
-    return render_template(
-        "dashboard.html",
-        role=user["role"]
-    )
+    return render_template("dashboard.html", role=user["role"])
 
 
 # =====================================================
-# UPLOAD DOCUMENT
+# UPLOAD
 # =====================================================
 
 @app.route("/upload", methods=["POST"])
 @login_required
 def upload():
     conn = get_db()
-
-    user = conn.execute("""
-        SELECT role FROM users WHERE id = ?
-    """, (session["user_id"],)).fetchone()
-
-    conn.close()
+    try:
+        user = conn.execute(
+            "SELECT role FROM users WHERE id = ?", (session["user_id"],)
+        ).fetchone()
+    finally:
+        conn.close()
 
     if not user or user["role"] == "admin":
         log_event("UPLOAD", result="denied")
         abort(403)
 
     if "document" not in request.files:
-        log_event(
-            "UPLOAD",
-            details="No file selected",
-            result="denied"
-        )
+        log_event("UPLOAD", details="No file selected", result="denied")
         return "No file selected."
 
     file = request.files["document"]
 
     if not file.filename:
-        log_event(
-            "UPLOAD",
-            details="Empty filename",
-            result="denied"
-        )
+        log_event("UPLOAD", details="Empty filename", result="denied")
         return "No file selected."
 
     if not allowed_file(file.filename):
-        log_event(
-            "UPLOAD",
-            details=file.filename,
-            result="denied"
-        )
+        log_event("UPLOAD", details=file.filename, result="denied")
         return "File type not allowed."
 
     original_filename = secure_filename(file.filename)
@@ -681,24 +854,16 @@ def upload():
         )
         return "Invalid or unsupported file content."
 
-    category = request.form.get(
-        "category", "General"
-    ).strip()[:100] or "General"
+    category = request.form.get("category", "General").strip()[:100] or "General"
 
-    stored_filename = save_encrypted_file(
-        file_data,
-        session["user_id"]
-    )
+    stored_filename = save_encrypted_file(file_data, session["user_id"])
 
     conn = get_db()
-
     try:
         conn.execute("""
             INSERT INTO documents (
-                user_id, filename, stored_filename,
-                encrypted, category, created_at
-            )
-            VALUES (?, ?, ?, 1, ?, ?)
+                user_id, filename, stored_filename, encrypted, category, created_at
+            ) VALUES (?, ?, ?, 1, ?, ?)
         """, (
             session["user_id"],
             original_filename,
@@ -706,27 +871,21 @@ def upload():
             category,
             datetime.now(timezone.utc).isoformat()
         ))
-
         conn.commit()
 
     except Exception:
-        file_path = os.path.join(
-            UPLOAD_FOLDER, stored_filename
-        )
-
-        if os.path.isfile(file_path):
-            os.remove(file_path)
-
+        try:
+            delete_stored_file(stored_filename)
+        except Exception:
+            app.logger.exception(
+                "Could not clean up uploaded file after database failure."
+            )
         raise
 
     finally:
         conn.close()
 
-    log_event(
-        "UPLOAD",
-        details=original_filename
-    )
-
+    log_event("UPLOAD", details=original_filename)
     return redirect(url_for("documents"))
 
 
@@ -735,64 +894,49 @@ def upload():
 # =====================================================
 
 @app.route("/documents")
-@login_required    
+@login_required
 def documents():
-    search = request.args.get(
-        "search", ""
-    ).strip()[:100]
+    search = request.args.get("search", "").strip()[:100]
 
     conn = get_db()
+    try:
+        files = conn.execute("""
+            SELECT DISTINCT d.*, u.email AS owner_email
+            FROM documents d
+            JOIN users u ON u.id = d.user_id
+            LEFT JOIN document_permissions p ON p.document_id = d.id
+            WHERE (d.user_id = ? OR p.user_id = ?)
+            AND (
+                d.filename LIKE ? OR u.email LIKE ?
+                OR d.category LIKE ? OR d.created_at LIKE ?
+            )
+            ORDER BY d.id DESC
+        """, (
+            session["user_id"],
+            session["user_id"],
+            "%" + search + "%",
+            "%" + search + "%",
+            "%" + search + "%",
+            "%" + search + "%"
+        )).fetchall()
 
-    files = conn.execute("""
-        SELECT DISTINCT
-            d.*,
-            u.email AS owner_email
-        FROM documents d
-        JOIN users u ON u.id = d.user_id
-        LEFT JOIN document_permissions p
-            ON p.document_id = d.id
-        WHERE (
-            d.user_id = ?
-            OR p.user_id = ?
-        )
-        AND (
-            d.filename LIKE ?
-            OR u.email LIKE ?
-            OR d.category LIKE ?
-            OR d.created_at LIKE ?
-        )
-        ORDER BY d.id DESC
-    """, (
-        session["user_id"],
-        session["user_id"],
-        "%" + search + "%",
-        "%" + search + "%",
-        "%" + search + "%",
-        "%" + search + "%"
-    )).fetchall()
+        permissions = {}
 
-    permissions = {}
+        for file in files:
+            if file["user_id"] == session["user_id"]:
+                shared_users = conn.execute("""
+                    SELECT p.user_id, u.email, p.permission
+                    FROM document_permissions p
+                    JOIN users u ON u.id = p.user_id
+                    WHERE p.document_id = ?
+                """, (file["id"],)).fetchall()
 
-    for file in files:
-        if file["user_id"] == session["user_id"]:
-            shared_users = conn.execute("""
-                SELECT
-                    p.user_id,
-                    u.email,
-                    p.permission
-                FROM document_permissions p
-                JOIN users u ON u.id = p.user_id
-                WHERE p.document_id = ?
-            """, (file["id"],)).fetchall()
+                permissions[file["id"]] = shared_users
 
-            permissions[file["id"]] = shared_users
+    finally:
+        conn.close()
 
-    conn.close()
-
-    log_event(
-        "DOCUMENT_SEARCH",
-        details=search
-    )
+    log_event("DOCUMENT_SEARCH", details=search)
 
     return render_template(
         "documents.html",
@@ -802,52 +946,26 @@ def documents():
     )
 
 
-
 # =====================================================
-# DOWNLOAD DOCUMENT
+# DOWNLOAD
 # =====================================================
 
 @app.route("/download/<int:document_id>")
 @login_required
 def download(document_id):
-    document, permission = get_document_access(
-        document_id
-    )
+    document, permission = get_document_access(document_id)
 
-    if not document or permission not in (
-        "owner", "read", "edit"
-    ):
-        log_event(
-            "DOWNLOAD",
-            document_id=document_id,
-            result="denied"
-        )
+    if not document or permission not in ("owner", "read", "edit"):
+        log_event("DOWNLOAD", document_id=document_id, result="denied")
         abort(403)
 
-    file_path = os.path.join(
-        UPLOAD_FOLDER,
-        document["stored_filename"]
-    )
-
-    if not os.path.isfile(file_path):
-        log_event(
-            "DOWNLOAD",
-            document_id=document_id,
-            result="failed"
-        )
-        abort(404)
-
     try:
-        with open(file_path, "rb") as stored_file:
-            file_data = stored_file.read()
+        file_data = read_stored_file(document["stored_filename"])
 
         if document["encrypted"] == 1:
             file_data = cipher.decrypt(file_data)
 
-        log_event(
-            "DOWNLOAD",
-            document_id=document_id
-        )
+        log_event("DOWNLOAD", document_id=document_id)
 
         return send_file(
             io.BytesIO(file_data),
@@ -855,55 +973,41 @@ def download(document_id):
             download_name=document["filename"]
         )
 
+    except FileNotFoundError:
+        log_event("DOWNLOAD", document_id=document_id, result="failed")
+        abort(404)
+
     except InvalidToken:
-        log_event(
-            "DOWNLOAD",
-            document_id=document_id,
-            result="failed"
-        )
+        log_event("DOWNLOAD", document_id=document_id, result="failed")
         return "Unable to decrypt document."
+
+    except Exception:
+        app.logger.exception("Document download failed.")
+        log_event("DOWNLOAD", document_id=document_id, result="failed")
+        abort(404)
 
 
 # =====================================================
 # REPLACE DOCUMENT
 # =====================================================
 
-@app.route(
-    "/replace/<int:document_id>",
-    methods=["POST"]
-)
+@app.route("/replace/<int:document_id>", methods=["POST"])
 @login_required
 def replace_document(document_id):
-    document, permission = get_document_access(
-        document_id
-    )
+    document, permission = get_document_access(document_id)
 
-    if not document or permission not in (
-        "owner", "edit"
-    ):
-        log_event(
-            "EDIT",
-            document_id=document_id,
-            result="denied"
-        )
+    if not document or permission not in ("owner", "edit"):
+        log_event("EDIT", document_id=document_id, result="denied")
         abort(403)
 
     if "document" not in request.files:
-        log_event(
-            "EDIT",
-            document_id=document_id,
-            result="denied"
-        )
+        log_event("EDIT", document_id=document_id, result="denied")
         return "Select a replacement file."
 
     file = request.files["document"]
 
     if not file.filename or not allowed_file(file.filename):
-        log_event(
-            "EDIT",
-            document_id=document_id,
-            result="denied"
-        )
+        log_event("EDIT", document_id=document_id, result="denied")
         return "File type not allowed."
 
     new_filename = secure_filename(file.filename)
@@ -914,62 +1018,39 @@ def replace_document(document_id):
     file_data = file.read()
 
     if not validate_file_content(new_filename, file_data):
-        log_event(
-            "EDIT",
-            document_id=document_id,
-            result="denied"
-        )
+        log_event("EDIT", document_id=document_id, result="denied")
         return "Invalid file content."
 
-    stored_filename = save_encrypted_file(
-        file_data,
-        document["user_id"]
-    )
+    stored_filename = save_encrypted_file(file_data, document["user_id"])
 
     conn = get_db()
-
     try:
         conn.execute("""
             UPDATE documents
-            SET filename = ?,
-                stored_filename = ?,
-                encrypted = 1
+            SET filename = ?, stored_filename = ?, encrypted = 1
             WHERE id = ?
-        """, (
-            new_filename,
-            stored_filename,
-            document_id
-        ))
+        """, (new_filename, stored_filename, document_id))
 
         conn.commit()
 
     except Exception:
-        new_path = os.path.join(
-            UPLOAD_FOLDER, stored_filename
-        )
-
-        if os.path.isfile(new_path):
-            os.remove(new_path)
-
+        try:
+            delete_stored_file(stored_filename)
+        except Exception:
+            app.logger.exception("Could not clean up replacement file.")
         raise
 
     finally:
         conn.close()
 
-    old_path = os.path.join(
-        UPLOAD_FOLDER,
-        document["stored_filename"]
-    )
+    try:
+        delete_stored_file(document["stored_filename"])
+    except Exception:
+        app.logger.exception(
+            "Could not remove old document file after replacement."
+        )
 
-    if os.path.isfile(old_path):
-        os.remove(old_path)
-
-    log_event(
-        "EDIT",
-        document_id=document_id,
-        details=new_filename
-    )
-
+    log_event("EDIT", document_id=document_id, details=new_filename)
     return redirect(url_for("documents"))
 
 
@@ -977,55 +1058,38 @@ def replace_document(document_id):
 # DELETE DOCUMENT
 # =====================================================
 
-@app.route(
-    "/delete/<int:document_id>",
-    methods=["POST"]
-)
+@app.route("/delete/<int:document_id>", methods=["POST"])
 @login_required
 def delete(document_id):
-    document, permission = get_document_access(
-        document_id
-    )
+    document, permission = get_document_access(document_id)
 
     if not document or permission != "owner":
-        log_event(
-            "DELETE",
-            document_id=document_id,
-            result="denied"
-        )
+        log_event("DELETE", document_id=document_id, result="denied")
         abort(403)
 
-    file_path = os.path.join(
-        UPLOAD_FOLDER,
-        document["stored_filename"]
-    )
-
     conn = get_db()
-
     try:
-        conn.execute("""
-            DELETE FROM document_permissions
-            WHERE document_id = ?
-        """, (document_id,))
+        conn.execute(
+            "DELETE FROM document_permissions WHERE document_id = ?",
+            (document_id,)
+        )
 
-        conn.execute("""
-            DELETE FROM documents
-            WHERE id = ?
-        """, (document_id,))
+        conn.execute(
+            "DELETE FROM documents WHERE id = ?",
+            (document_id,)
+        )
 
         conn.commit()
 
     finally:
         conn.close()
 
-    if os.path.isfile(file_path):
-        os.remove(file_path)
+    try:
+        delete_stored_file(document["stored_filename"])
+    except Exception:
+        app.logger.exception("Could not remove deleted document from storage.")
 
-    log_event(
-        "DELETE",
-        document_id=document_id
-    )
-
+    log_event("DELETE", document_id=document_id)
     return redirect(url_for("documents"))
 
 
@@ -1033,46 +1097,27 @@ def delete(document_id):
 # SHARE DOCUMENT
 # =====================================================
 
-@app.route(
-    "/share/<int:document_id>",
-    methods=["POST"]
-)
+@app.route("/share/<int:document_id>", methods=["POST"])
 @login_required
 def share_document(document_id):
-    document, permission = get_document_access(
-        document_id
-    )
+    document, permission = get_document_access(document_id)
 
     if not document or permission != "owner":
-        log_event(
-            "PERMISSION_GRANT",
-            document_id=document_id,
-            result="denied"
-        )
+        log_event("PERMISSION_GRANT", document_id=document_id, result="denied")
         abort(403)
 
-    email = request.form.get(
-        "email", ""
-    ).strip().lower()
-
-    access = request.form.get(
-        "permission", "read"
-    ).strip().lower()
+    email = request.form.get("email", "").strip().lower()
+    access = request.form.get("permission", "read").strip().lower()
 
     if access not in ("read", "edit"):
-        log_event(
-            "PERMISSION_GRANT",
-            document_id=document_id,
-            result="denied"
-        )
+        log_event("PERMISSION_GRANT", document_id=document_id, result="denied")
         return "Invalid permission."
 
     conn = get_db()
-
     try:
-        target_user = conn.execute("""
-            SELECT id FROM users WHERE email = ?
-        """, (email,)).fetchone()
+        target_user = conn.execute(
+            "SELECT id FROM users WHERE email = ?", (email,)
+        ).fetchone()
 
         if not target_user:
             return "User not found. They must register first."
@@ -1111,44 +1156,28 @@ def share_document(document_id):
 
 
 # =====================================================
-# REVOKE DOCUMENT ACCESS
+# REVOKE ACCESS
 # =====================================================
 
-@app.route(
-    "/revoke/<int:document_id>/<int:target_user_id>",
-    methods=["POST"]
-)
+@app.route("/revoke/<int:document_id>/<int:target_user_id>", methods=["POST"])
 @login_required
-def revoke_permission(
-    document_id,
-    target_user_id
-):
-    document, permission = get_document_access(
-        document_id
-    )
+def revoke_permission(document_id, target_user_id):
+    document, permission = get_document_access(document_id)
 
     if not document or permission != "owner":
-        log_event(
-            "PERMISSION_REVOKE",
-            document_id=document_id,
-            result="denied"
-        )
+        log_event("PERMISSION_REVOKE", document_id=document_id, result="denied")
         abort(403)
 
     conn = get_db()
-
     try:
-        target = conn.execute("""
-            SELECT email FROM users WHERE id = ?
-        """, (target_user_id,)).fetchone()
+        target = conn.execute(
+            "SELECT email FROM users WHERE id = ?", (target_user_id,)
+        ).fetchone()
 
         deleted = conn.execute("""
             DELETE FROM document_permissions
             WHERE document_id = ? AND user_id = ?
-        """, (
-            document_id,
-            target_user_id
-        ))
+        """, (document_id, target_user_id))
 
         conn.commit()
 
@@ -1171,35 +1200,30 @@ def revoke_permission(
     )
 
     return redirect(url_for("documents"))
-
-
 # =====================================================
-# ADMIN AUDIT PAGE
+# ADMIN AUDIT LOGS
 # =====================================================
 
 @app.route("/admin/audit")
 @admin_required
 def admin_audit():
     conn = get_db()
+    try:
+        logs = conn.execute("""
+            SELECT *
+            FROM audit_logs
+            ORDER BY id DESC
+            LIMIT 500
+        """).fetchall()
+    finally:
+        conn.close()
 
-    logs = conn.execute("""
-        SELECT
-            audit_logs.*,
-            users.email
-        FROM audit_logs
-        LEFT JOIN users
-            ON users.id = audit_logs.user_id
-        ORDER BY audit_logs.id DESC
-    """).fetchall()
-
-    conn.close()
-
-    chain_valid = verify_audit_chain()
+    integrity_valid = verify_audit_chain()
 
     return render_template(
         "admin_audit.html",
         logs=logs,
-        chain_valid=chain_valid
+        integrity_valid=integrity_valid
     )
 
 
@@ -1207,24 +1231,17 @@ def admin_audit():
 # LOGOUT
 # =====================================================
 
-@app.route("/logout", methods=["GET", "POST"])
+@app.route("/logout", methods=["POST"])
 @login_required
 def logout():
     log_event("LOGOUT")
-
     session.clear()
-
     return redirect(url_for("login"))
 
 
 # =====================================================
 # ERROR HANDLERS
 # =====================================================
-
-@app.errorhandler(400)
-def bad_request(error):
-    return "Invalid request or CSRF validation failed.", 400
-
 
 @app.errorhandler(403)
 def forbidden(error):
@@ -1233,57 +1250,50 @@ def forbidden(error):
 
 @app.errorhandler(404)
 def not_found(error):
-    return "Document or page not found.", 404
+    return "Requested page or document was not found.", 404
 
 
 @app.errorhandler(413)
 def file_too_large(error):
-    return "File is too large. Maximum size is 16 MB.", 413
+    return "File is too large.", 413
 
 
 # =====================================================
-# ADMIN ACCOUNT CREATION
+# CREATE ADMIN ACCOUNT
 # =====================================================
 
 def create_admin_account(email, password):
+    if not email or "@" not in email:
+        raise ValueError("Enter a valid admin email.")
+
     if len(password) < 8:
-        print("Password must contain at least 8 characters.")
-        return False
+        raise ValueError("Admin password must contain at least 8 characters.")
 
     conn = get_db()
 
     try:
-        existing_user = conn.execute("""
-            SELECT id FROM users WHERE email = ?
-        """, (email,)).fetchone()
-
-        hashed_password = generate_password_hash(password)
+        existing_user = conn.execute(
+            "SELECT id FROM users WHERE email = ?",
+            (email,)
+        ).fetchone()
 
         if existing_user:
-            conn.execute("""
-                UPDATE users
-                SET role = 'admin', password = ?
-                WHERE email = ?
-            """, (hashed_password, email))
-
-            print("Existing account updated as admin.")
-
+            conn.execute(
+                "UPDATE users SET role = 'admin', password = ? WHERE id = ?",
+                (generate_password_hash(password), existing_user["id"])
+            )
         else:
-            conn.execute("""
-                INSERT INTO users (email, password, role)
-                VALUES (?, ?, 'admin')
-            """, (
-                email,
-                hashed_password
-            ))
-
-            print("Admin account created.")
+            conn.execute(
+                "INSERT INTO users (email, password, role) VALUES (?, ?, 'admin')",
+                (email, generate_password_hash(password))
+            )
 
         conn.commit()
-        return True
 
     finally:
         conn.close()
+
+    print("Admin account created successfully.")
 
 
 # =====================================================
@@ -1291,20 +1301,17 @@ def create_admin_account(email, password):
 # =====================================================
 
 if __name__ == "__main__":
-    create_database()
 
-    if (
-        len(sys.argv) == 4
-        and sys.argv[1] == "create-admin"
-    ):
-        admin_email = sys.argv[2].strip().lower()
-        admin_password = sys.argv[3]
+    if USE_POSTGRES:
+        check_postgres_schema()
+    else:
+        create_database()
 
+    if len(sys.argv) == 4 and sys.argv[1] == "create-admin":
         create_admin_account(
-            admin_email,
-            admin_password
+            sys.argv[2].strip().lower(),
+            sys.argv[3]
         )
-
         sys.exit(0)
 
     app.run(
