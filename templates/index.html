@@ -1,13 +1,30 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TrustVault | Secure Documents</title>
+    <title>TrustVault</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-    <h1>Welcome to TrustVault</h1>
-    <p>Secure Documents. Trusted Access.</p>
+
+    <h1>TrustVault</h1>
+
+    <h2>Secure Documents. Trusted Access.</h2>
+
+    <p>Your documents, protected and organised in one secure place.</p>
+
+    <p>
+        Upload, encrypt, manage and share your documents
+        with controlled access.
+    </p>
+
+    <a href="{{ url_for('login') }}">Login</a>
+
+    <br><br>
+
+    <a href="{{ url_for('register') }}">Create an Account</a>
+
 </body>
 </html>

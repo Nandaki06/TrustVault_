@@ -1,7 +1,38 @@
+
+# Python virtual environment
 venv/
 __pycache__/
 *.pyc
-secret.key
+*.pyo
+*.pyd
+
+# Databases and backups
 trustvault.db
+trustvault_backup.db
+*.db
+
+# Uploaded and encrypted documents
 uploads/
+
+# Secret keys and environment files
+secret.key
+.flask_secret
 .env
+.env.*
+
+# Temporary and backup files
+*.zip
+app - Copy.py
+
+# Python testing and cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db

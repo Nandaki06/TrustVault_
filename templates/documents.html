@@ -1,9 +1,10 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Documents | TrustVault</title>
+    <title>My Documents - TrustVault</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
@@ -11,34 +12,150 @@
     <h1>TrustVault</h1>
     <p>Secure Documents. Trusted Access.</p>
 
-    <form>
-        <h2>My Documents</h2>
+    <h2>My Documents</h2>
 
-        {% if files %}
-            {% for file in files %}
+    <form action="{{ url_for('documents') }}" method="GET">
+        <label>Search Documents</label>
+        <input
+            type="text"
+            name="search"
+            value="{{ search }}"
+            placeholder="Search by name, owner, category or date"
+        >
+        <button type="submit">Search</button>
+    </form>
 
-                <p>{{ file["filename"] }}</p>
+    <p>
+        <a href="{{ url_for('dashboard') }}">Back to Dashboard</a>
+    </p>
 
-                <a href="{{ url_for('download', document_id=file['id']) }}">
-                    Download
-                </a>
+    {% if files %}
 
-                <form method="POST" action="{{ url_for('delete', document_id=file['id']) }}">
-                    <button type="submit">Delete</button>
-                </form>
+        {% for file in files %}
 
-                <hr>
+            <section>
+                <h3>{{ file.filename }}</h3>
 
-            {% endfor %}
-        {% else %}
-            <p>No documents uploaded yet.</p>
-        {% endif %}
+                <p><strong>Owner:</strong> {{ file.owner_email }}</p>
+                <p><strong>Category:</strong> {{ file.category }}</p>
+                <p><strong>Uploaded:</strong> {{ file.created_at }}</p>
 
-        <a href="/dashboard">Back to Dashboard</a>
+                <p>
+                    <a href="{{ url_for('download', document_id=file.id) }}">
+                        Download Document
+                    </a>
+                </p>
 
-        <br><br>
+                {% if file.user_id == session["user_id"] %}
 
-        <a href="/logout">Logout</a>
+                    <h3>Replace Document</h3>
+
+                    <form
+                        action="{{ url_for('replace_document', document_id=file.id) }}"
+                        method="POST"
+                        enctype="multipart/form-data"
+                    >
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+                        <input
+                            type="file"
+                            name="document"
+                            accept=".pdf,.png,.jpg,.jpeg,.docx"
+                            required
+                        >
+
+                        <button type="submit">Replace</button>
+                    </form>
+
+                    <h3>Share Document</h3>
+
+                    <form
+                        action="{{ url_for('share_document', document_id=file.id) }}"
+                        method="POST"
+                    >
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+                        <label>Registered User Email</label>
+                        <input
+                            type="email"
+                            name="email"
+                            placeholder="Enter user's email"
+                            required
+                        >
+
+                        <label>Permission</label>
+                        <select name="permission" required>
+                            <option value="read">Read Only</option>
+                            <option value="edit">Edit</option>
+                        </select>
+
+                        <button type="submit">Share Document</button>
+                    </form>
+
+                    <h3>Shared Users</h3>
+
+                    {% if permissions.get(file.id) %}
+
+                        {% for shared_user in permissions.get(file.id) %}
+
+                            <p>
+                                <strong>Email:</strong> {{ shared_user.email }}
+                                <br>
+                                <strong>Access:</strong> {{ shared_user.permission }}
+                            </p>
+
+                            <form
+                                action="{{ url_for(
+                                    'revoke_permission',
+                                    document_id=file.id,
+                                    target_user_id=shared_user.user_id
+                                ) }}"
+                                method="POST"
+                            >
+                                <input
+                                    type="hidden"
+                                    name="csrf_token"
+                                    value="{{ csrf_token }}"
+                                >
+
+                                <button type="submit">Revoke Access</button>
+                            </form>
+
+                        {% endfor %}
+
+                    {% else %}
+                        <p>This document has not been shared yet.</p>
+                    {% endif %}
+
+                    <h3>Delete Document</h3>
+
+                    <form
+                        action="{{ url_for('delete', document_id=file.id) }}"
+                        method="POST"
+                    >
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit">Delete Document</button>
+                    </form>
+
+                {% else %}
+
+                    <p><strong>Shared Document</strong></p>
+
+                {% endif %}
+
+            </section>
+
+        {% endfor %}
+
+    {% else %}
+
+        <p>No documents found.</p>
+
+    {% endif %}
+
+    <form action="{{ url_for('logout') }}" method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Logout</button>
     </form>
 
 </body>

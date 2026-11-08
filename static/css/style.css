@@ -1,60 +1,138 @@
+
 * {
+    box-sizing: border-box;
     margin: 0;
     padding: 0;
-    box-sizing: border-box;
 }
 
 body {
     font-family: Arial, sans-serif;
-    background: #080d1c;
-    color: white;
-    min-height: 100vh;
+    background: #f4f6fb;
+    color: #202b3c;
+    line-height: 1.6;
+    padding: 30px 20px;
 }
 
 h1 {
-    color: #60a5fa;
-    text-align: center;
-    margin-top: 100px;
-    font-size: 42px;
-}
-
-p {
-    color: #a5b4fc;
-    text-align: center;
-    margin-top: 15px;
-    font-size: 18px;
-}
-form {
-    width: 350px;
-    margin: 40px auto;
-    padding: 30px;
-    background: #111a30;
-    border-radius: 15px;
-    text-align: center;
+    color: #243b70;
+    margin-bottom: 8px;
 }
 
 h2 {
-    color: #60a5fa;
-    margin-bottom: 25px;
+    color: #243b70;
+    margin: 22px 0 15px;
 }
 
-input {
-    width: 100%;
-    padding: 12px;
+h3 {
+    margin-bottom: 10px;
+}
+
+p {
     margin: 10px 0;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    background: #080d1c;
-    color: white;
+}
+
+a {
+    color: #3157a4;
+    text-decoration: none;
+    margin-right: 10px;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+form {
+    background: white;
+    max-width: 520px;
+    padding: 22px;
+    margin: 20px 0;
+    border-radius: 10px;
+    box-shadow: 0 3px 14px rgba(0, 0, 0, 0.07);
+}
+
+label {
+    display: block;
+    margin: 12px 0 5px;
+    font-weight: bold;
+}
+
+input,
+select {
+    width: 100%;
+    padding: 11px;
+    border: 1px solid #cbd3e1;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 15px;
 }
 
 button {
-    width: 100%;
-    padding: 12px;
-    margin-top: 15px;
-    background: #2563eb;
+    background: #3157a4;
     color: white;
     border: none;
-    border-radius: 8px;
+    padding: 11px 18px;
+    border-radius: 6px;
     cursor: pointer;
+    font-size: 14px;
+    margin: 5px 5px 5px 0;
+}
+
+button:hover {
+    background: #243b70;
+}
+
+button:disabled {
+    background: #999;
+    cursor: not-allowed;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+    margin-top: 18px;
+}
+
+th,
+td {
+    padding: 12px;
+    border: 1px solid #dce1ea;
+    text-align: left;
+}
+
+th {
+    background: #e8edf8;
+}
+
+section,
+.card {
+    background: white;
+    padding: 20px;
+    margin: 18px 0;
+    border-radius: 10px;
+    box-shadow: 0 3px 14px rgba(0, 0, 0, 0.06);
+}
+
+.error {
+    color: #c62828;
+}
+
+.success {
+    color: #218838;
+}
+
+@media (max-width: 600px) {
+    body {
+        padding: 18px 12px;
+    }
+
+    table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+
+    form {
+        padding: 16px;
+    }
 }

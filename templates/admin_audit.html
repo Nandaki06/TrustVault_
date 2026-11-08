@@ -1,0 +1,79 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Audit - TrustVault</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+    <h1>TrustVault</h1>
+    <p>Secure Documents. Trusted Access.</p>
+
+    <h2>Admin Audit Dashboard</h2>
+
+    <h3>Audit Trail Integrity</h3>
+
+    {% if chain_valid %}
+        <p>Audit chain verification: Valid</p>
+    {% else %}
+        <p>Audit chain verification: Failed. Possible tampering detected.</p>
+    {% endif %}
+
+    <hr>
+
+    <h3>Activity Logs</h3>
+
+    {% if logs %}
+
+        <table border="1" cellpadding="8">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>User</th>
+                    <th>Action</th>
+                    <th>Document ID</th>
+                    <th>Details</th>
+                    <th>Result</th>
+                    <th>Date & Time</th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {% for log in logs %}
+                    <tr>
+                        <td>{{ log["id"] }}</td>
+                        <td>{{ log["email"] or "Unknown" }}</td>
+                        <td>{{ log["action"] }}</td>
+                        <td>{{ log["document_id"] or "-" }}</td>
+                        <td>{{ log["details"] or "-" }}</td>
+                        <td>{{ log["result"] }}</td>
+                        <td>{{ log["created_at"] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+    {% else %}
+
+        <p>No activity logs available.</p>
+
+    {% endif %}
+
+    <br>
+
+    <a href="{{ url_for('dashboard') }}">Back to Dashboard</a>
+
+    <br><br>
+
+    <form action="{{ url_for('logout') }}" method="POST">
+        <input type="hidden"
+               name="csrf_token"
+               value="{{ csrf_token }}">
+        <button type="submit">Logout</button>
+    </form>
+
+</body>
+</html>
