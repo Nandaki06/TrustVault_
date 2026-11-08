@@ -36,3 +36,8 @@ htmlcov/
 # Operating system files
 .DS_Store
 Thumbs.db
+# Local backup and error files
+app.py.py
+app_backup.py
+error.txt
+flask_error.txt
